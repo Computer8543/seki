@@ -1,0 +1,7 @@
+- id: seki
+  name: seki invariant check
+  description: Run fail-closed seki invariant verification on staged changes using the cached Python environment.
+  entry: seki check
+  language: python
+  pass_filenames: false
+  always_run: true

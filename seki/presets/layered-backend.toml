@@ -1,0 +1,3 @@
+schema_version = 1
+presets = ["layered-backend"]
+enabled_rules = ["LAY-001", "SQL-001", "SQL-002"]

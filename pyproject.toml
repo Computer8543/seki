@@ -34,3 +34,6 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "S", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501", "S101", "S105", "S603", "S607", "UP032", "UP035"]

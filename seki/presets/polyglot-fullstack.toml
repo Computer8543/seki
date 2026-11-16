@@ -1,0 +1,3 @@
+schema_version = 1
+presets = ["polyglot-fullstack"]
+enabled_rules = ["POLY-001", "POLY-002", "POLY-003"]

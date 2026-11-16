@@ -1,0 +1,4 @@
+schema_version = 1
+presets = ["postgres-pg16"]
+enabled_rules = ["POLY-002"]
+rls_allowlist = []

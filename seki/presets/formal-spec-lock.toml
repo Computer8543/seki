@@ -1,0 +1,3 @@
+schema_version = 1
+presets = ["formal-spec-lock"]
+enabled_rules = ["TLA-001"]

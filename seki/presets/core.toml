@@ -1,0 +1,3 @@
+schema_version = 1
+presets = ["core"]
+enabled_rules = ["AST-001", "AST-002", "AST-003", "HYG-001", "HYG-002"]

@@ -1,0 +1,81 @@
+name: seki CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-staging:
+    name: Initiative 1A Staging Gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip and pinned wheelhouse
+        id: wheel-cache
+        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf9656451  # v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/seki-wheels
+          key: ${{ runner.os }}-py312-wheels-${{ hashFiles('pyproject.toml', '.github/workflows/ci.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-py312-wheels-
+
+      - name: Populate pinned wheelhouse on cache miss
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.cache/seki-wheels
+          python3 -m pip download \
+            --dest ~/.cache/seki-wheels \
+            setuptools==75.6.0 \
+            wheel==0.45.1 \
+            mypy==1.13.0 \
+            ruff==0.8.4 \
+            pytest==9.0.3 \
+            pytest-cov==6.0.0 \
+            coverage==7.15.4
+
+      - name: Install pinned build and dev tools offline
+        run: |
+          python3 -m pip install \
+            --no-index \
+            --find-links ~/.cache/seki-wheels \
+            setuptools==75.6.0 \
+            wheel==0.45.1 \
+            mypy==1.13.0 \
+            ruff==0.8.4 \
+            pytest==9.0.3 \
+            pytest-cov==6.0.0 \
+            coverage==7.15.4
+
+      - name: Build and install seki wheel offline
+        run: |
+          rm -rf dist
+          python3 -m pip wheel --no-build-isolation --no-deps --wheel-dir dist .
+          python3 -m pip install --no-index --no-deps --find-links dist seki
+          command -v seki
+          python3 -c "import importlib.metadata; print(importlib.metadata.version('seki'))"
+
+      - name: Run Initiative 1A staging verification
+        run: ./verify.sh --staging
