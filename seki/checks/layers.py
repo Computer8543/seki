@@ -18,10 +18,12 @@ _SQL_PATTERN: re.Pattern[str] = re.compile(
 
 
 def _is_test_path(rel_path: Path) -> bool:
+    name = rel_path.name
     return (
         "tests" in rel_path.parts
-        or rel_path.name.startswith("test_")
-        or rel_path.name.endswith("_test.py")
+        or "test" in rel_path.parts
+        or name == "conftest.py"
+        or (len(rel_path.parts) == 1 and (name.startswith("test_") or name.endswith("_test.py")))
     )
 
 
@@ -45,14 +47,18 @@ def _joined_str_preview(node: ast.JoinedStr) -> str:
     )
 
 
-def _is_sql_format_call(node: ast.Call) -> bool:
-    return (
-        isinstance(node.func, ast.Attribute)
-        and node.func.attr == "format"
-        and isinstance(node.func.value, ast.Constant)
-        and isinstance(node.func.value.value, str)
-        and _SQL_PATTERN.search(node.func.value.value) is not None
-    )
+def _collect_docstring_ids(tree: ast.AST) -> set[int]:
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        ):
+            ids.add(id(node.body[0].value))
+    return ids
 
 
 class _LayerScanner(ast.NodeVisitor):
@@ -66,12 +72,15 @@ class _LayerScanner(ast.NodeVisitor):
         check_layers: bool,
         check_sql_literal: bool,
         check_sql_interp: bool,
+        docstring_ids: set[int],
     ) -> None:
         self._rel_path_str = rel_path_str
         self._changed_lines = changed_lines
         self._check_layers = check_layers
         self._check_sql_literal = check_sql_literal
         self._check_sql_interp = check_sql_interp
+        self._docstring_ids = docstring_ids
+        self._sql_vars: set[str] = set()
         self.findings: list[ScrubbedFinding] = []
 
     def _add(self, rule_id: str, message: str, line: int) -> None:
@@ -85,9 +94,25 @@ class _LayerScanner(ast.NodeVisitor):
                 )
             )
 
+    def _is_sql_expr(self, expr: ast.expr) -> bool:
+        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+            return _SQL_PATTERN.search(expr.value) is not None
+        return isinstance(expr, ast.Name) and expr.id in self._sql_vars
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        if (
+            isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+            and _SQL_PATTERN.search(node.value.value) is not None
+        ):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self._sql_vars.add(target.id)
+        self.generic_visit(node)
+
     def visit_Import(self, node: ast.Import) -> None:
         if self._check_layers and any(
-            alias.name.split(".")[0] == "database" for alias in node.names
+            "database" in alias.name.split(".") for alias in node.names
         ):
             self._add(
                 "LAY-001",
@@ -96,7 +121,10 @@ class _LayerScanner(ast.NodeVisitor):
             )
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        if self._check_layers and (node.module or "").split(".")[0] == "database":
+        if self._check_layers and (
+            "database" in (node.module or "").split(".")
+            or any("database" in alias.name.split(".") for alias in node.names)
+        ):
             self._add(
                 "LAY-001",
                 "Layer boundary violation: restricted layer imports from 'database' directly.",
@@ -114,8 +142,26 @@ class _LayerScanner(ast.NodeVisitor):
             if isinstance(part, ast.FormattedValue):
                 self.visit(part.value)
 
+    def visit_BinOp(self, node: ast.BinOp) -> None:
+        if (
+            self._check_sql_interp
+            and isinstance(node.op, ast.Mod | ast.Add)
+            and (self._is_sql_expr(node.left) or self._is_sql_expr(node.right))
+        ):
+            self._add(
+                "SQL-002",
+                "Potential SQL injection via string concatenation or '%' formatting.",
+                node.lineno,
+            )
+        self.generic_visit(node)
+
     def visit_Call(self, node: ast.Call) -> None:
-        if self._check_sql_interp and _is_sql_format_call(node):
+        if (
+            self._check_sql_interp
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "format"
+            and self._is_sql_expr(node.func.value)
+        ):
             self._add(
                 "SQL-002",
                 "Potential SQL injection via str.format() interpolation.",
@@ -129,6 +175,7 @@ class _LayerScanner(ast.NodeVisitor):
     def visit_Constant(self, node: ast.Constant) -> None:
         if (
             self._check_sql_literal
+            and id(node) not in self._docstring_ids
             and isinstance(node.value, str)
             and _SQL_PATTERN.search(node.value) is not None
         ):
@@ -170,6 +217,7 @@ def scan_layers(
         check_layers=check_layers,
         check_sql_literal=check_sql_literal,
         check_sql_interp=check_sql_interp,
+        docstring_ids=_collect_docstring_ids(tree),
     )
     scanner.visit(tree)
     return scanner.findings

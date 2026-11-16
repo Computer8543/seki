@@ -10,6 +10,10 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
+if [[ -x "$ROOT_DIR/.venv/bin/python3" ]]; then
+  export PATH="$ROOT_DIR/.venv/bin:$PATH"
+fi
+
 echo "[1/5] Checking zero pragma: no cover in seki/..."
 if [[ ! -d "seki" ]]; then
   echo "FAIL: seki/ package directory missing" >&2

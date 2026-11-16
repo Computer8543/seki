@@ -18,7 +18,7 @@ _JWT_RE = re.compile(
     r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*(?![A-Za-z0-9_-])"
 )
 _API_KEY_RE = re.compile(
-    r"\bsk-(?:live|test)-[A-Za-z0-9]{16,}\b"
+    r"\bsk[-_](?:live|test)[-_][A-Za-z0-9]{16,}\b"
     r"|\bAKIA[0-9A-Z]{16}\b"
     r"|\bgh[pousr]_[A-Za-z0-9_]{20,}\b"
 )
@@ -152,6 +152,7 @@ class ScrubbedFinding:
             raise PermissionError(
                 "ScrubbedFinding cannot be instantiated directly; use ScrubbedFinding.create()"
             )
+        object.__setattr__(self, "file_path", scrub_sensitive_text(self.file_path))
         object.__setattr__(self, "message", scrub_sensitive_text(self.message))
 
     @classmethod

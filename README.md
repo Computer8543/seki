@@ -7,11 +7,11 @@
 ## Features (v0.9 Wave 1 Unblocker)
 
 - **Zero Runtime Dependencies**: Pure Python standard library core (`dependencies = []`), running offline at `$0.00/mo`.
-- **Fail-Closed `seki.toml` v1 Config Loader**: Reads `seki.toml` or `pyproject.toml` `[tool.seki]`, falling back to the embedded `core.toml` preset. Rejects unknown top-level keys, unknown presets, syntax errors, and missing/unsupported `schema_version` with exit code `3`.
-- **Sub-150ms Staged-Diff Execution**: `seki check` defaults to staged diff hunks (`git diff --cached -U0`), scanning only modified lines locally while supporting full-repo scans via `seki check --all`.
-- **Pure AST Anti-Reward-Hacking (`AST-001`..`AST-003`)**: Blocks production `assert` statements (surviving `python3 -O`), stub/no-op bodies and unauthorized coverage pragmas, and module-scope import-time I/O/network/subprocess side effects.
-- **Architectural Layer & FinOps Checks (`LAY-001`, `SQL-001`..`SQL-002`, `HYG-001`..`HYG-002`, `FIN-001`)**: Enforces `api/` / `services/` / `workers/` isolation from `database/`, isolates raw SQL to `repositories/` and `migrations/`, blocks f-string / `.format()` SQL interpolation, prevents secret exposure in logs/`__repr__`, requires `==` pins in `requirements*.txt`, and blocks paid cloud/AI SDKs under `zero-budget`.
-- **Polyglot Hygiene (`POLY-001`..`POLY-003`)**: Validates 40-character commit SHA pins and `permissions` in GitHub Actions `.yml`/`.yaml` (exempting `./` and `docker://`), semicolon-buffered `.sql` migrations for `ENABLE ROW LEVEL SECURITY` and destructive DDL, and stdlib-decoded JWT `"role": "service_role"`, PEM private keys, and hardcoded API tokens in `.ts`/`.tsx`/`.js`/`.jsx`/`.swift` without leaking raw secrets to stdout/stderr.
+- **Fail-Closed `seki.toml` v1 Config Loader**: Reads `seki.toml` or `pyproject.toml` `[tool.seki]`, falling back to the embedded `core.toml` preset. Rejects unknown top-level keys, unknown presets/rules, `formal-spec-lock`/`TLA-001` (unsupported in `v0.9`), syntax errors, and missing/unsupported `schema_version` with exit code `3`, while deep-freezing `SekiConfig.extensions` and preserving the `core` baseline if `presets = []` or `enabled_rules = []`.
+- **Sub-150ms Staged-Diff Execution**: `seki check` resolves the repository root, defaults to staged diff hunks (`git diff --cached -U0`, including deletion-only hunks), reads staged index blobs (`git show :<path>`) rather than unstaged working-tree edits, and supports full-repo scans via `seki check --all`.
+- **Pure AST Anti-Reward-Hacking (`AST-001`..`AST-003`)**: Blocks production `assert` statements and fail-closed `SyntaxError`s (surviving `python3 -O`), stub/no-op bodies (including docstring-only functions, `0`/`""`/`b""`/`()` returns, and test stubs) and unauthorized coverage pragmas, and module-scope import-time I/O/env/network/subprocess side effects (including class bodies, decorators, defaults, and import aliases).
+- **Architectural Layer & FinOps Checks (`LAY-001`, `SQL-001`..`SQL-002`, `HYG-001`..`HYG-002`, `FIN-001`)**: Enforces `api/` / `services/` / `workers/` isolation from direct, dotted, and relative `database` imports, isolates raw SQL to `repositories/` and `migrations/` (excluding docstrings), blocks f-string / `.format()` / `%` / `+` SQL interpolation, prevents secret exposure in logs/`__repr__`/subscripts, requires strict numeric `==` pins in `requirements*.txt` and `requirements/*.txt` (with `--hash=` support), and blocks paid cloud/AI SDKs under `zero-budget` / `budget_ceiling_usd = 0.0`.
+- **Polyglot Hygiene (`POLY-001`..`POLY-003`)**: Validates 40-character commit SHA pins (standard, quoted, or flow YAML syntax) and `permissions` in GitHub Actions `.yml`/`.yaml` (exempting `./` and `docker://`), semicolon-buffered `.sql` migrations across the migration set for `ENABLE ROW LEVEL SECURITY`, `DISABLE ROW LEVEL SECURITY`, and destructive DDL, and stdlib-decoded JWT `"role": "service_role"`, PEM private keys, and hardcoded API tokens (`sk-live-`/`sk_live_`/`sk-test-`/`sk_test_`/`AKIA`) in `.ts`/`.tsx`/`.mts`/`.cts`/`.js`/`.jsx`/`.mjs`/`.cjs`/`.swift` without leaking raw secrets or IPv4 paths to stdout/stderr.
 
 ---
 
@@ -27,7 +27,7 @@ python3 -m pip install --no-build-isolation --no-deps .
 
 ## Quickstart
 
-Initialize a baseline `seki.toml` in your repository:
+Initialize a baseline `seki.toml` in your repository (refuses to overwrite an existing `seki.toml`, exiting `3`):
 
 ```bash
 seki init
@@ -56,7 +56,7 @@ python3 -m seki.cli check --all
 - `0`: All in-scope checks passed (`PASS`).
 - `1`: One or more invariant violations detected (`FAIL_INVARIANT`).
 - `2`: Reserved for anti-tamper guard (`FAIL_TAMPER`, Initiative 1B).
-- `3`: Fail-closed configuration or git environment error (`FAIL_CONFIG`).
+- `3`: Fail-closed configuration, invalid CLI usage/arguments, existing `seki.toml` on `init`, unreadable file, or git environment error (`FAIL_CONFIG`).
 
 ---
 
@@ -75,11 +75,11 @@ solver = "tlc"
 ```
 
 - `schema_version` (**required**): Must be integer `1`.
-- `presets`: List of built-in preset names (`core`, `layered-backend`, `zero-budget`, `polyglot-fullstack`, `postgres-pg16`, `formal-spec-lock`). Defaults to `["core"]` unless `enabled_rules` is explicitly set.
-- `enabled_rules`: Optional explicit list of rule IDs (combined additively with selected `presets`).
+- `presets`: List of active `v0.9` preset names (`core`, `layered-backend`, `zero-budget`, `polyglot-fullstack`, `postgres-pg16`). Defaults to `["core"]` unless `enabled_rules` is explicitly set (and falls back to `["core"]` if both `presets` and `enabled_rules` are empty). `formal-spec-lock` is rejected with exit code `3` in `v0.9`.
+- `enabled_rules`: Optional explicit list of valid rule IDs (combined additively with selected `presets`; unknown rule IDs or `TLA-001` fail closed with exit code `3`).
 - `budget_ceiling_usd`: Optional finite non-negative number (defaults to `0.0` when `zero-budget` is active).
 - `rls_allowlist`: Table names exempt from `POLY-002` `ENABLE ROW LEVEL SECURITY` enforcement.
-- `[extensions.<namespace>]`: Passed through verbatim into frozen `SekiConfig.extensions`.
+- `[extensions.<namespace>]`: Passed through verbatim into deeply frozen `SekiConfig.extensions` (`MappingProxyType` and `tuple`).
 
 ### Built-In Embedded Presets
 
@@ -90,7 +90,7 @@ solver = "tlc"
 | `zero-budget` | `FIN-001` | Blocks paid cloud/AI SDK imports with `budget_ceiling_usd = 0.0` |
 | `polyglot-fullstack` | `POLY-001`, `POLY-002`, `POLY-003` | GitHub Actions SHA pins, SQL RLS/DDL, and client JWT/PEM/API secret detection |
 | `postgres-pg16` | `POLY-002` | PostgreSQL migration `ENABLE ROW LEVEL SECURITY` and destructive DDL checks |
-| `formal-spec-lock` | `TLA-001` | Formal spec lock policy preset |
+| `formal-spec-lock` | `TLA-001` | Embedded schema placeholder (`v1.1 tla_gate.py`; fails closed with exit `3` in `v0.9`) |
 
 ---
 

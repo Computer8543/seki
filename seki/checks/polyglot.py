@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from seki.config import SekiConfig
@@ -19,24 +19,33 @@ _SUFFIX_TO_RULE: dict[str, str] = {
     ".sql": "POLY-002",
     ".ts": "POLY-003",
     ".tsx": "POLY-003",
+    ".mts": "POLY-003",
+    ".cts": "POLY-003",
     ".js": "POLY-003",
     ".jsx": "POLY-003",
+    ".mjs": "POLY-003",
+    ".cjs": "POLY-003",
     ".swift": "POLY-003",
 }
 
 _YML_WRITE_ALL_RE = re.compile(r"""^\s*permissions:\s*["']?write-all\b""")
-_YML_USES_RE = re.compile(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)")
+_YML_USES_RE = re.compile(r"""(?:^|[\s{,-])["']?uses["']?\s*:\s*([^\s#}]+)""")
 _ACTION_SHA_PIN_RE = re.compile(r"^[^@]+@[0-9a-fA-F]{40}$")
 
 _SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*[\s\S]*?\*/")
 _SQL_DESTRUCTIVE_RE = re.compile(r"\b(?:DROP\s+TABLE|TRUNCATE)\b", re.IGNORECASE)
 _SQL_CREATE_TABLE_RE = re.compile(
-    r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_."]+)',
+    r'CREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_."]+)',
     re.IGNORECASE,
 )
 _SQL_ALTER_RLS_RE = re.compile(
     r'ALTER\s+TABLE\s+(?:ONLY\s+)?(?:IF\s+EXISTS\s+)?([A-Za-z0-9_."]+)'
     r"\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY",
+    re.IGNORECASE,
+)
+_SQL_DISABLE_RLS_RE = re.compile(
+    r'ALTER\s+TABLE\s+(?:ONLY\s+)?(?:IF\s+EXISTS\s+)?([A-Za-z0-9_."]+)'
+    r"\s+DISABLE\s+ROW\s+LEVEL\s+SECURITY",
     re.IGNORECASE,
 )
 
@@ -47,7 +56,7 @@ _CLIENT_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         "Detected PEM private key block in client source",
     ),
     (
-        re.compile(r"\bsk-(?:live|test)-[A-Za-z0-9]{16,}\b"),
+        re.compile(r"\bsk[-_](?:live|test)[-_][A-Za-z0-9]{16,}\b"),
         "Detected hardcoded API secret token in client source",
     ),
     (
@@ -116,7 +125,7 @@ def _scan_github_actions(
         uses_match = _YML_USES_RE.search(line)
         if uses_match is None:
             continue
-        action_ref = uses_match.group(1).strip("'\"")
+        action_ref = uses_match.group(1).strip(",}'\"")
         if action_ref.startswith(("./", "docker://")):
             continue
         if not _ACTION_SHA_PIN_RE.match(action_ref):
@@ -131,15 +140,30 @@ def _scan_github_actions(
     return findings
 
 
+def collect_migration_rls_tables(sources: Iterable[str]) -> set[str]:
+    """Collect tables whose final migration state has RLS enabled across SQL sources."""
+    enabled: set[str] = set()
+    for source in sources:
+        for stmt, _ in _split_sql_statements(source):
+            enable_match = _SQL_ALTER_RLS_RE.search(stmt)
+            if enable_match is not None:
+                enabled.add(_normalize_table_name(enable_match.group(1)))
+            disable_match = _SQL_DISABLE_RLS_RE.search(stmt)
+            if disable_match is not None:
+                enabled.discard(_normalize_table_name(disable_match.group(1)))
+    return enabled
+
+
 def _scan_sql_migrations(
     source: str,
     file_str: str,
     rls_allowlist: tuple[str, ...],
     changed_lines: set[int] | None,
+    external_rls_enabled: set[str] | None = None,
 ) -> list[ScrubbedFinding]:
     findings: list[ScrubbedFinding] = []
     created_public_tables: list[tuple[str, int]] = []
-    rls_enabled: set[str] = set()
+    rls_enabled: set[str] = set(external_rls_enabled) if external_rls_enabled is not None else set()
     normalized_allowlist = {_normalize_table_name(name) for name in rls_allowlist}
 
     for stmt, start_line in _split_sql_statements(source):
@@ -160,6 +184,19 @@ def _scan_sql_migrations(
         alter_match = _SQL_ALTER_RLS_RE.search(stmt)
         if alter_match is not None:
             rls_enabled.add(_normalize_table_name(alter_match.group(1)))
+        disable_match = _SQL_DISABLE_RLS_RE.search(stmt)
+        if disable_match is not None:
+            disabled_table = _normalize_table_name(disable_match.group(1))
+            rls_enabled.discard(disabled_table)
+            if _line_in_scope(start_line, changed_lines):
+                findings.append(
+                    make_finding(
+                        "POLY-002",
+                        f"Disabling ROW LEVEL SECURITY on '{disabled_table}' is blocked",
+                        file_str,
+                        line=start_line,
+                    )
+                )
 
     for table_name, start_line in created_public_tables:
         if (
@@ -233,6 +270,7 @@ def scan_polyglot_file(
     rel_path: Path,
     config: SekiConfig | None = None,
     changed_lines: set[int] | None = None,
+    external_rls_enabled: set[str] | None = None,
 ) -> list[ScrubbedFinding]:
     """Scan a single source string for POLY-001, POLY-002, or POLY-003 violations."""
     enabled_rules = _DEFAULT_POLYGLOT_RULES if config is None else config.enabled_rules
@@ -245,7 +283,13 @@ def scan_polyglot_file(
         return _scan_github_actions(source, file_str, changed_lines)
     if rule_id == "POLY-002":
         rls_allowlist = () if config is None else config.rls_allowlist
-        return _scan_sql_migrations(source, file_str, rls_allowlist, changed_lines)
+        return _scan_sql_migrations(
+            source,
+            file_str,
+            rls_allowlist,
+            changed_lines,
+            external_rls_enabled=external_rls_enabled,
+        )
     return _scan_client_secrets(source, file_str, changed_lines)
 
 
@@ -258,11 +302,38 @@ def scan_polyglot_files(
     if not enabled_rules & _DEFAULT_POLYGLOT_RULES:
         return []
 
+    sql_sources: list[tuple[Path, str]] = []
+    cached_sources: dict[Path, str] = {}
+    for file_path in sorted(files, key=lambda p: p.as_posix()):
+        if (
+            file_path.suffix.lower() == ".sql"
+            and "POLY-002" in enabled_rules
+            and file_path.is_file()
+        ):
+            text = file_path.read_text(encoding="utf-8", errors="replace")
+            cached_sources[file_path] = text
+            sql_sources.append((file_path, text))
+
+    external_rls = (
+        collect_migration_rls_tables(text for _, text in sql_sources) if sql_sources else None
+    )
+
     findings: list[ScrubbedFinding] = []
     for file_path in files:
         rule_id = _SUFFIX_TO_RULE.get(file_path.suffix.lower())
         if rule_id is None or rule_id not in enabled_rules or not file_path.is_file():
             continue
-        source = file_path.read_text(encoding="utf-8", errors="replace")
-        findings.extend(scan_polyglot_file(source, file_path, config=config))
+        source = (
+            cached_sources[file_path]
+            if file_path in cached_sources
+            else file_path.read_text(encoding="utf-8", errors="replace")
+        )
+        findings.extend(
+            scan_polyglot_file(
+                source,
+                file_path,
+                config=config,
+                external_rls_enabled=external_rls,
+            )
+        )
     return findings

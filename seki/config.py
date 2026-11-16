@@ -18,16 +18,40 @@ from seki.primitives import Result, SekiError, _ConstructorToken
 
 _TOKEN = _ConstructorToken()
 
-KNOWN_PRESETS: Mapping[str, frozenset[str]] = MappingProxyType(
+SUPPORTED_PRESETS: frozenset[str] = frozenset(
+    {"core", "layered-backend", "zero-budget", "polyglot-fullstack", "postgres-pg16"}
+)
+UNSUPPORTED_V09_PRESETS: frozenset[str] = frozenset({"formal-spec-lock"})
+KNOWN_RULES: frozenset[str] = frozenset(
     {
-        "core": frozenset({"AST-001", "AST-002", "AST-003", "HYG-001", "HYG-002"}),
-        "layered-backend": frozenset({"LAY-001", "SQL-001", "SQL-002"}),
-        "zero-budget": frozenset({"FIN-001"}),
-        "polyglot-fullstack": frozenset({"POLY-001", "POLY-002", "POLY-003"}),
-        "postgres-pg16": frozenset({"POLY-002"}),
-        "formal-spec-lock": frozenset({"TLA-001"}),
+        "AST-001",
+        "AST-002",
+        "AST-003",
+        "LAY-001",
+        "SQL-001",
+        "SQL-002",
+        "HYG-001",
+        "HYG-002",
+        "FIN-001",
+        "POLY-001",
+        "POLY-002",
+        "POLY-003",
+        "SUP-001",
     }
 )
+
+
+def _load_preset_rules() -> Mapping[str, frozenset[str]]:
+    loaded: dict[str, frozenset[str]] = {}
+    presets_root = importlib.resources.files(_presets_pkg)
+    for preset_name in sorted(SUPPORTED_PRESETS):
+        raw_text = presets_root.joinpath(f"{preset_name}.toml").read_text(encoding="utf-8")
+        data = tomllib.loads(raw_text)
+        loaded[preset_name] = frozenset(cast(list[str], data["enabled_rules"]))
+    return MappingProxyType(loaded)
+
+
+KNOWN_PRESETS: Mapping[str, frozenset[str]] = _load_preset_rules()
 
 ALLOWED_TOP_KEYS: frozenset[str] = frozenset(
     {
@@ -63,10 +87,16 @@ def _config_err(code: str, message: str) -> Result[Any]:
     return Result.err(SekiError(code=code, message=message, exit_code=3))
 
 
+def _freeze_value(val: Any) -> Any:
+    if isinstance(val, Mapping):
+        return MappingProxyType({k: _freeze_value(v) for k, v in val.items()})
+    if isinstance(val, list):
+        return tuple(_freeze_value(item) for item in val)
+    return val
+
+
 def _freeze_mapping(mapping: Mapping[str, Any]) -> Mapping[str, Any]:
-    return MappingProxyType(
-        {k: _freeze_mapping(v) if isinstance(v, Mapping) else v for k, v in mapping.items()}
-    )
+    return cast(Mapping[str, Any], _freeze_value(mapping))
 
 
 def _parse_str_list(
@@ -133,6 +163,16 @@ def _validate_config_mapping(raw: Mapping[str, Any]) -> Result[SekiConfig]:
         return Result.err(presets_res.error)
     presets = tuple(dict.fromkeys(presets_res.value))
 
+    unsupported_presets = [name for name in presets if name in UNSUPPORTED_V09_PRESETS]
+    if unsupported_presets:
+        return _config_err(
+            "ERR_UNSUPPORTED_PRESET",
+            (
+                "Preset 'formal-spec-lock' (TLA-001) requires seki/tla_gate.py "
+                "and is not supported in v0.9"
+            ),
+        )
+
     unknown_presets = [name for name in presets if name not in KNOWN_PRESETS]
     if unknown_presets:
         return _config_err(
@@ -143,6 +183,22 @@ def _validate_config_mapping(raw: Mapping[str, Any]) -> Result[SekiConfig]:
     explicit_rules_res = _parse_str_list(raw, "enabled_rules", ())
     if explicit_rules_res.error is not None:
         return Result.err(explicit_rules_res.error)
+
+    if "TLA-001" in explicit_rules_res.value:
+        return _config_err(
+            "ERR_UNSUPPORTED_PRESET",
+            "Rule 'TLA-001' requires seki/tla_gate.py and is not supported in v0.9",
+        )
+
+    unknown_rules = [rule for rule in explicit_rules_res.value if rule not in KNOWN_RULES]
+    if unknown_rules:
+        return _config_err(
+            "ERR_UNKNOWN_RULE",
+            f"Unknown rule(s) in enabled_rules: {', '.join(unknown_rules)}",
+        )
+
+    if not presets and not explicit_rules_res.value:
+        presets = ("core",)
 
     rls_res = _parse_str_list(raw, "rls_allowlist", ())
     if rls_res.error is not None:

@@ -13,6 +13,12 @@ dependencies = []
 [project.scripts]
 seki = "seki.cli:main"
 
+[tool.setuptools.packages.find]
+include = ["seki*"]
+
+[tool.setuptools.package-data]
+"seki.presets" = ["*.toml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --strict-config"

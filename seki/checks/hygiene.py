@@ -10,14 +10,17 @@ from pathlib import Path
 from seki.config import SekiConfig
 from seki.primitives import ScrubbedFinding, make_finding
 
-_SENSITIVE_NAME_RE: re.Pattern[str] = re.compile(
-    r"(?:password|passwd|secret|api_key|apikey|private_key|access_key|token)",
-    re.IGNORECASE,
+_CAMEL_RE: re.Pattern[str] = re.compile(r"([a-z0-9])([A-Z])")
+_TOKEN_SPLIT_RE: re.Pattern[str] = re.compile(r"[^a-z0-9]+")
+_SENSITIVE_WORDS: frozenset[str] = frozenset({"password", "passwd", "secret", "apikey", "token"})
+_SENSITIVE_PAIRS: frozenset[str] = frozenset(
+    {"api_key", "private_key", "access_key", "secret_key"}
 )
 _LOGGER_METHODS: frozenset[str] = frozenset(
     {"debug", "info", "warning", "error", "critical", "exception", "log"}
 )
-_PINNED_REQ_RE: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_.\-\[\]]+==[^\s>=<~!]+$")
+_REQ_OPTION_RE: re.Pattern[str] = re.compile(r"\s+--[A-Za-z0-9_-]+=\S+")
+_PINNED_REQ_RE: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_.\-\[\]]+==[0-9][A-Za-z0-9_.\-+!]*$")
 _BLOCKED_CLOUD_SDKS: frozenset[str] = frozenset(
     {
         "boto3",
@@ -34,10 +37,29 @@ _BLOCKED_CLOUD_SDKS: frozenset[str] = frozenset(
 
 
 def _is_test_path(rel_path: Path) -> bool:
+    name = rel_path.name
     return (
         "tests" in rel_path.parts
-        or rel_path.name.startswith("test_")
-        or rel_path.name.endswith("_test.py")
+        or "test" in rel_path.parts
+        or name == "conftest.py"
+        or (len(rel_path.parts) == 1 and (name.startswith("test_") or name.endswith("_test.py")))
+    )
+
+
+def is_requirements_file(rel_path: Path) -> bool:
+    """Return True when rel_path points to a pip requirements text file."""
+    return rel_path.suffix.lower() == ".txt" and (
+        rel_path.name.startswith("requirements") or "requirements" in rel_path.parts[:-1]
+    )
+
+
+def _is_sensitive_ident(ident: str) -> bool:
+    normalized = _CAMEL_RE.sub(r"\1_\2", ident).lower()
+    words = [word for word in _TOKEN_SPLIT_RE.split(normalized) if word]
+    if any(word in _SENSITIVE_WORDS for word in words):
+        return True
+    return any(
+        f"{words[idx]}_{words[idx + 1]}" in _SENSITIVE_PAIRS for idx in range(len(words) - 1)
     )
 
 
@@ -55,7 +77,7 @@ def _scan_requirements(
         line = raw_line.split("#", 1)[0].strip().removesuffix("\\").strip()
         if not line or line.startswith(("-r", "-c", "--")):
             continue
-        pkg_spec = line.split(";", 1)[0].strip()
+        pkg_spec = _REQ_OPTION_RE.sub("", line.split(";", 1)[0]).strip()
         if not _PINNED_REQ_RE.match(pkg_spec) and _in_changed_lines(lineno, changed_lines):
             findings.append(
                 make_finding(
@@ -85,9 +107,15 @@ def _sensitive_ref_line(
                 ident = sub.id
             elif isinstance(sub, ast.Attribute):
                 ident = sub.attr
+            elif (
+                isinstance(sub, ast.Subscript)
+                and isinstance(sub.slice, ast.Constant)
+                and isinstance(sub.slice.value, str)
+            ):
+                ident = sub.slice.value
             else:
                 continue
-            if _SENSITIVE_NAME_RE.search(ident) is not None and (
+            if _is_sensitive_ident(ident) and (
                 changed_lines is None
                 or sub.lineno in changed_lines
                 or parent_lineno in changed_lines
@@ -126,7 +154,7 @@ def scan_hygiene(
     changed_lines: set[int] | None = None,
 ) -> list[ScrubbedFinding]:
     """Scan requirements files and Python modules for hygiene and FinOps violations."""
-    if rel_path.name.startswith("requirements") and rel_path.name.endswith(".txt"):
+    if is_requirements_file(rel_path):
         return (
             _scan_requirements(source, rel_path.as_posix(), changed_lines)
             if "HYG-002" in config.enabled_rules
